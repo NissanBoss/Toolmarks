@@ -103,12 +103,26 @@ source and fail if the code has grown the ability to write a file or open a
 socket. A promise only a person checks is a promise that quietly stops being
 true.
 
+## Getting it
+
+Take a package from [Releases](https://github.com/NissanBoss/Toolmarks/releases),
+for Windows, Linux, or either kind of Mac. One executable, nothing to
+install.
+
 ## Building
 
 Rust, and nothing else. No crates, no C libraries, no build script.
 
 ```
 cargo build --release
+```
+
+`build.sh` is what the release workflow runs, and it is the same script you
+can run at home: it checks formatting, runs clippy and runs the tests before
+it builds anything, then packages the result.
+
+```
+sh build.sh
 ```
 
 ## A note on scanning itself

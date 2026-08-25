@@ -1,0 +1,109 @@
+name: Release
+
+# Pushing a tag builds a package on each system and puts them all on one
+# release.
+#
+#   git tag v1
+#   git push origin refs/tags/v1
+#
+# The long form of the push is deliberate: with a branch and a tag of the
+# same name, plain `git push origin v1` fails and does not say which of the
+# two it meant.
+#
+# Rust cannot be cross compiled without a linker for the target, so unlike
+# a Go project this builds on several machines rather than one. The Mac is
+# the exception: the compiler that comes with it can target both Apple and
+# Intel, so one Mac makes both Mac packages. That also keeps the release off
+# the Intel runners, which are scarce and on their way out.
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            name: linux
+          - os: windows-latest
+            name: windows
+          - os: macos-latest
+            name: mac
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Rust
+        run: rustup toolchain install stable --profile minimal --component rustfmt,clippy
+
+      # The same script anybody can run at home. It checks formatting, runs
+      # clippy and runs the tests before it builds anything, so a tag cannot
+      # ship something that would not have built on a laptop.
+      - name: Build
+        shell: bash
+        run: sh build.sh "$GITHUB_REF_NAME"
+
+      - name: Build the Intel Mac package too
+        if: matrix.os == 'macos-latest'
+        shell: bash
+        run: sh build.sh "$GITHUB_REF_NAME" x86_64-apple-darwin
+
+      # Unpack what is actually going to be uploaded and ask it its version,
+      # rather than trusting the binary that is still sitting in target/.
+      # What gets published is a different file from the one that was built,
+      # and only one of the two is what people will download.
+      - name: Ask the packaged binary what version it is
+        shell: bash
+        run: |
+          mkdir -p check
+          if [ "${{ matrix.os }}" = "windows-latest" ]; then
+            # PowerShell rather than unzip, which is not on every runner.
+            powershell -NoProfile -Command \
+              "Expand-Archive -Path dist/toolmarks-windows.zip -DestinationPath check -Force"
+            exe=check/toolmarks-windows/toolmarks.exe
+          elif [ "${{ matrix.os }}" = "ubuntu-latest" ]; then
+            tar -xzf dist/toolmarks-linux.tar.gz -C check
+            exe=check/toolmarks-linux/toolmarks
+          else
+            tar -xzf dist/toolmarks-mac-apple.tar.gz -C check
+            exe=check/toolmarks-mac-apple/toolmarks
+          fi
+          chmod +x "$exe"
+          said=$("$exe" --version)
+          echo "The package says: $said"
+          if [ "$said" != "toolmarks $GITHUB_REF_NAME" ]; then
+            echo "The tag is $GITHUB_REF_NAME and the packaged binary disagrees."
+            exit 1
+          fi
+          # It has to still do its job after the round trip through an
+          # archive. One is the honest answer here: a runner builds under
+          # its own home directory, so the binary does carry a path.
+          "$exe" "$exe" || [ $? = 1 ]
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: toolmarks-${{ matrix.name }}
+          path: |
+            dist/*.zip
+            dist/*.tar.gz
+
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: packages
+          merge-multiple: true
+
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: packages/*
+          generate_release_notes: true

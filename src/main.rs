@@ -26,6 +26,16 @@ mod tests;
 
 use std::process::ExitCode;
 
+/// What this build calls itself. `build.sh` puts the tag in the environment
+/// when there is one, so the tag is what a release reports rather than a
+/// number sitting in Cargo.toml that somebody forgot to raise. A build with
+/// no tag falls back to Cargo.toml, which is how a copy built at home stays
+/// honest about not being a release.
+const VERSION: &str = match option_env!("TOOLMARKS_VERSION") {
+    Some(tag) => tag,
+    None => env!("CARGO_PKG_VERSION"),
+};
+
 const USAGE: &str = "\
 toolmarks: what a compiled binary says about the machine that built it.
 
@@ -58,7 +68,7 @@ fn main() -> ExitCode {
                 return ExitCode::SUCCESS;
             }
             "-V" | "--version" => {
-                println!("toolmarks {}", env!("CARGO_PKG_VERSION"));
+                println!("toolmarks {VERSION}");
                 return ExitCode::SUCCESS;
             }
             "-r" | "--reveal" => reveal = true,
