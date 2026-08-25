@@ -1,0 +1,7 @@
+# Windows turns line feeds into carriage returns on checkout, and then
+# rustfmt reports every file in the repository as needing to be reformatted.
+*.rs   text eol=lf
+*.toml text eol=lf
+*.md   text eol=lf
+*.sh   text eol=lf
+*.yml  text eol=lf

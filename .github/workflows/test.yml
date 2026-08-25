@@ -1,0 +1,76 @@
+name: Test
+
+# All three systems, because all three container formats are read here and
+# each runner is the only place its own one turns up in a file this
+# repository did not write by hand.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Rust
+        run: rustup toolchain install stable --profile minimal --component rustfmt,clippy
+
+      - name: Formatting
+        run: cargo fmt --check
+
+      - name: Clippy
+        run: cargo clippy --all-targets -- -D warnings
+
+      - name: Tests
+        run: cargo test
+
+      # The unit tests feed the readers bytes assembled in Rust. This is the
+      # only step where they meet a real linker's output, and on each runner
+      # it is a different format.
+      - name: Read a binary this machine actually built
+        shell: bash
+        run: |
+          cargo build --release
+          exe=target/release/toolmarks${{ matrix.os == 'windows-latest' && '.exe' || '' }}
+          before=$(cksum < "$exe")
+          set +e
+          "$exe" "$exe" > report.txt
+          code=$?
+          set -e
+          cat report.txt
+          # Zero and one are both fine: a runner builds under its own home
+          # directory, so a finding here is correct. Two means the reader
+          # could not open a file its own toolchain had just produced.
+          if [ "$code" = "2" ]; then
+            echo "It could not read a binary built on this very machine."
+            exit 1
+          fi
+          grep -qE 'ELF|PE|Mach-O' report.txt
+          # The promise the README makes, checked against the bytes.
+          after=$(cksum < "$exe")
+          if [ "$before" != "$after" ]; then
+            echo "It wrote to a file it was told only to read."
+            exit 1
+          fi
+
+      - name: Say so plainly when handed something that is not an executable
+        shell: bash
+        run: |
+          exe=target/release/toolmarks${{ matrix.os == 'windows-latest' && '.exe' || '' }}
+          printf 'not an executable, just a note\n' > notes.txt
+          set +e
+          "$exe" notes.txt
+          code=$?
+          set -e
+          if [ "$code" != "2" ]; then
+            echo "A text file should come back as unreadable, got exit $code."
+            exit 1
+          fi
