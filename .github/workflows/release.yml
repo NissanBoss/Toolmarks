@@ -10,6 +10,11 @@ name: Release
 # same name, plain `git push origin v1` fails and does not say which of the
 # two it meant.
 #
+# Running it by hand from the Actions tab builds and packages everything but
+# publishes nothing. That matters because otherwise this file is only ever
+# exercised by a tag, and a tag is a poor place to discover that something
+# in here broke.
+#
 # Rust cannot be cross compiled without a linker for the target, so unlike
 # a Go project this builds on several machines rather than one. The Mac is
 # the exception: the compiler that comes with it can target both Apple and
@@ -78,7 +83,11 @@ jobs:
           chmod +x "$exe"
           said=$("$exe" --version)
           echo "The package says: $said"
-          if [ "$said" != "toolmarks $GITHUB_REF_NAME" ]; then
+          # Only a tag has a version to be checked against. Run by hand this
+          # builds and packages the same way but has nothing to compare to,
+          # and that is the point: it is how the rest of this file gets
+          # exercised without spending a tag to find out it is broken.
+          if [ "$GITHUB_REF_TYPE" = "tag" ] && [ "$said" != "toolmarks $GITHUB_REF_NAME" ]; then
             echo "The tag is $GITHUB_REF_NAME and the packaged binary disagrees."
             exit 1
           fi
@@ -87,23 +96,66 @@ jobs:
           # its own home directory, so the binary does carry a path.
           "$exe" "$exe" || [ $? = 1 ]
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: toolmarks-${{ matrix.name }}
           path: |
             dist/*.zip
             dist/*.tar.gz
 
+  # Publishing is the one step a trial run must not do. Without this guard a
+  # dispatch from a branch would put out a release named after the branch.
   release:
     needs: build
+    if: startsWith(github.ref, 'refs/tags/')
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           path: packages
           merge-multiple: true
 
-      - uses: softprops/action-gh-release@v2
+      # The release text comes from CHANGELOG.md, from the section whose
+      # heading matches this tag exactly. No section, no notes: better than
+      # letting GitHub paste a list of commit messages, which is what it
+      # does on its own and which says nothing to somebody who arrived
+      # here from a search.
+      - name: Prepare the release notes
+        run: |
+          if [ -f CHANGELOG.md ]; then
+            awk -v wanted="## $GITHUB_REF_NAME" '
+              $0 == wanted { inside = 1; next }
+              /^## / { inside = 0 }
+              inside { print }
+            ' CHANGELOG.md > notes.md
+          fi
+          touch notes.md
+          cat >> notes.md <<'END'
+
+          ## Download
+
+          Take the package for your system, unpack it, and run the binary.
+          There is nothing to install.
+
+          | System | Package |
+          |---|---|
+          | Windows | `toolmarks-windows.zip` |
+          | Linux | `toolmarks-linux.tar.gz` |
+          | Mac with Apple silicon | `toolmarks-mac-apple.tar.gz` |
+          | Mac with Intel | `toolmarks-mac-intel.tar.gz` |
+
+          Point it at the binary you are about to publish. It reads ELF, PE
+          and Mach-O and says what the compiler wrote into it about the
+          machine that built it: the debug path with your username in it,
+          the home directory in the panic strings, the toolchain versions,
+          the timestamps that give away your timezone.
+
+          It only reads. It changes nothing and sends nothing anywhere.
+          END
+          echo "--- notes ---"
+          cat notes.md
+
+      - uses: softprops/action-gh-release@v3
         with:
           files: packages/*
-          generate_release_notes: true
+          body_path: notes.md
