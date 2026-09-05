@@ -9,6 +9,7 @@
 use crate::binary::{Endian, Format, Opened, Section, cstr_at, fixed_name, u16_at, u32_at};
 use crate::error::{Result, bail};
 use crate::finding::{Finding, Kind};
+use crate::signature;
 
 /// PE is little endian on every machine anybody still builds for.
 const E: Endian = Endian::Little;
@@ -16,6 +17,14 @@ const E: Endian = Endian::Little;
 /// The debug directory is the seventh entry in the table of data
 /// directories, counting from zero.
 const DEBUG_DIRECTORY: usize = 6;
+
+/// And the certificate table is the fifth. It is the one directory whose
+/// entry is a file offset rather than an address, because it is not loaded
+/// into memory: the signature is not part of the running program.
+const CERTIFICATE_TABLE: usize = 4;
+
+/// The only kind of certificate entry anybody writes.
+const PKCS_SIGNED: u16 = 0x0002;
 
 /// The debug record that carries a path. The other types point at split
 /// symbol files or vendor blobs and say nothing about the builder.
@@ -70,6 +79,7 @@ pub fn open(file: &[u8]) -> Result<Opened> {
         )),
     }
     findings.extend(debug_records(file, optional, &spans));
+    findings.extend(signing(file, optional));
 
     Ok(Opened {
         format: Format::Pe,
@@ -239,4 +249,111 @@ pub(crate) fn utc(stamp: u32) -> String {
     let year = yoe + era * 400 + if month <= 2 { 1 } else { 0 };
 
     format!("{year:04}-{month:02}-{day:02} {hour:02}:{minute:02}:{second:02} UTC")
+}
+
+/// signing reads the certificate table, which is where a signed PE keeps
+/// the block that names whoever signed it.
+///
+/// The table is the one data directory whose address is a plain file
+/// offset. Everything else in the optional header is an address in the
+/// image as loaded, and translating one of those needs the sections;
+/// this one needs nothing, because the signature is never loaded.
+fn signing(file: &[u8], optional: usize) -> Vec<Finding> {
+    let directories = match u16_at(file, optional, E) {
+        Some(0x10b) => optional + 96,
+        Some(0x20b) => optional + 112,
+        _ => return Vec::new(), // already said, by the debug reader
+    };
+    let entry = directories + CERTIFICATE_TABLE * 8;
+    let at = u32_at(file, entry, E).unwrap_or(0) as usize;
+    let size = u32_at(file, entry + 4, E).unwrap_or(0) as usize;
+    if at == 0 || size == 0 {
+        return Vec::new(); // not signed, which is not a finding
+    }
+    let Some(table) = file.get(at..at.saturating_add(size)) else {
+        return vec![Finding::unread(
+            Kind::SignedBy,
+            "certificate table",
+            "the table is said to be outside the file",
+        )];
+    };
+
+    // The table is a run of entries, each with its own length. In practice
+    // there is one, and reading the run rather than assuming that costs
+    // four lines.
+    let mut walked = 0usize;
+    let mut findings = Vec::new();
+    while walked + 8 <= table.len() && findings.is_empty() {
+        let length = u32_at(table, walked, E).unwrap_or(0) as usize;
+        let kind = u16_at(table, walked + 6, E).unwrap_or(0);
+        if length < 8 || walked + length > table.len() {
+            break;
+        }
+        if kind == PKCS_SIGNED {
+            findings = describe(&table[walked + 8..walked + length], "certificate table");
+        }
+        // Entries are padded to a multiple of eight.
+        walked += length.next_multiple_of(8).max(8);
+    }
+    if findings.is_empty() {
+        findings.push(Finding::unread(
+            Kind::SignedBy,
+            "certificate table",
+            "there is a signature here and it is not in a shape this reads",
+        ));
+    }
+    findings
+}
+
+pub(crate) fn describe(block: &[u8], site: &str) -> Vec<Finding> {
+    let signed = signature::read(block);
+    let mut findings = Vec::new();
+
+    if let Some(why) = &signed.trouble {
+        findings.push(Finding::unread(Kind::SignedBy, site, why));
+        return findings;
+    }
+
+    let who = signed.who();
+    if !who.is_empty() {
+        let issued = signed.issued_by();
+        let mut finding = Finding::measured(Kind::SignedBy, site, &who);
+        if !signed.personal() {
+            // A company name is not a person's name, and failing somebody's
+            // build over their employer's certificate would be crying wolf.
+            finding = finding.anonymous();
+        }
+        if !issued.is_empty() {
+            finding = finding.fix(format!(
+                "issued by {issued}. Nothing to do about it if the file has to be \
+                 signed, and worth knowing that this name travels in every copy"
+            ));
+        }
+        findings.push(finding);
+    }
+
+    if !signed.serial.is_empty() {
+        findings.push(Finding::measured(
+            Kind::SignedWith,
+            site,
+            format!("serial {}", signed.serial),
+        ));
+    }
+
+    match (&signed.signed_at, signed.timestamped) {
+        (Some(when), _) => findings.push(
+            Finding::measured(Kind::SignedAt, "countersignature", when).fix(
+                "there is no flag for this one. A timestamp is a reading of \
+                 somebody else's clock at the moment you signed, so setting \
+                 SOURCE_DATE_EPOCH hides the link time and leaves this",
+            ),
+        ),
+        (None, true) => findings.push(Finding::unread(
+            Kind::SignedAt,
+            "countersignature",
+            "this is timestamped and the time is in a shape this does not read",
+        )),
+        (None, false) => {}
+    }
+    findings
 }

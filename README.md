@@ -55,9 +55,30 @@ code you published is not the code that produced the file. The module path
 names your account and repository even when the binary is passed on with no
 other context.
 
+**The signature, which names somebody on purpose.** That is what a signature
+is for, and it is why nobody thinks about it: the name is meant to be there,
+so it does not read as a leak. It is still a name and it is still in every
+copy of the file. A company certificate names the company. One issued to a
+person carries their legal name rather than the handle they publish under,
+and often their town as well.
+
+The certificate's own serial comes with it, and that is the part that links
+things: two projects published under two names and signed with one
+certificate are one person.
+
+On a Mach-O the same block also carries the **Apple developer team**, which
+is registered to a named account, and the **code signing identifier**, which
+for something built by hand is a full path.
+
+**When it was signed, which no build flag reaches.** The report below tells
+you to put a hash in the link timestamp so the hour you were working does not
+go out with the file. If you do that and then sign, the countersignature puts
+the hour straight back, because it is a reading of a timestamping service's
+clock rather than anything your build wrote. Nothing else says so.
+
 **The build environment.** The compiler version, the exact commit the Rust
-standard library was built from, the SDK a Mach-O was built against, and the
-timestamp in the PE header. None of these names anybody on its own. Gathered
+standard library was built from, the SDK a Mach-O was built against, the
+build id an ELF carries, and the timestamp in the PE header. None of these names anybody on its own. Gathered
 across a few releases, the timestamps outline the hours somebody keeps, and
 so their time zone.
 

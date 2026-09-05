@@ -29,6 +29,11 @@ pub enum Kind {
     ToolchainHash,
     CompilerVersion,
     BuildTime,
+    SignedBy,
+    SignedWith,
+    SignedAt,
+    BuildId,
+    TeamId,
 }
 
 impl Kind {
@@ -43,6 +48,11 @@ impl Kind {
             Kind::ToolchainHash => "Toolchain commit",
             Kind::CompilerVersion => "Compiler version",
             Kind::BuildTime => "Build timestamp",
+            Kind::SignedBy => "Who signed it",
+            Kind::SignedWith => "The certificate it was signed with",
+            Kind::SignedAt => "When it was signed",
+            Kind::BuildId => "Build id",
+            Kind::TeamId => "Apple developer team",
         }
     }
 
@@ -84,6 +94,31 @@ impl Kind {
                 "The compiler and version, which on Linux usually narrows the \
                  distribution and its release."
             }
+            Kind::SignedBy => {
+                "A signature names whoever signed, on purpose, in every copy \
+                 of the file. A certificate issued to a company names the \
+                 company; one issued to a person names that person, by their \
+                 legal name rather than the handle they publish under."
+            }
+            Kind::SignedWith => {
+                "The certificate's own number. Every binary signed with this \
+                 certificate carries it, so two projects published under two \
+                 names and signed with one certificate are one person."
+            }
+            Kind::SignedAt => {
+                "A timestamping service read its clock at the moment this was \
+                 signed. Unlike the link time it cannot be made reproducible, \
+                 because it is not written by your build."
+            }
+            Kind::BuildId => {
+                "A hash the linker writes to tie a binary to its debug \
+                 information. It is the same in every copy of this build, so \
+                 it matches a published file against one found anywhere else."
+            }
+            Kind::TeamId => {
+                "The identifier of the Apple developer account this was signed \
+                 under, which is registered to a named person or company."
+            }
             Kind::BuildTime => {
                 "When the file was linked. Gathered across several releases it \
                  outlines the hours somebody keeps, and so their time zone."
@@ -96,7 +131,10 @@ impl Kind {
     /// carrying somebody's name and not merely for carrying a compiler
     /// version, which every binary does.
     pub fn identifies(self) -> bool {
-        matches!(self, Kind::HomePath | Kind::PdbPath | Kind::CargoRegistry)
+        matches!(
+            self,
+            Kind::HomePath | Kind::PdbPath | Kind::CargoRegistry | Kind::SignedBy | Kind::TeamId
+        )
     }
 
     /// Identity first, then the build environment, then timing. Someone
@@ -105,9 +143,10 @@ impl Kind {
     fn rank(self) -> u8 {
         match self {
             Kind::HomePath | Kind::PdbPath | Kind::CargoRegistry => 0,
-            Kind::ModulePath | Kind::Revision | Kind::DirtyTree => 1,
-            Kind::ToolchainHash | Kind::CompilerVersion => 2,
-            Kind::BuildTime => 3,
+            Kind::SignedBy | Kind::TeamId => 0,
+            Kind::ModulePath | Kind::Revision | Kind::DirtyTree | Kind::SignedWith => 1,
+            Kind::ToolchainHash | Kind::CompilerVersion | Kind::BuildId => 2,
+            Kind::BuildTime | Kind::SignedAt => 3,
         }
     }
 }

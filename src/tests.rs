@@ -320,6 +320,11 @@ fn every_kind_of_finding_says_why_it_matters() {
         Kind::ToolchainHash,
         Kind::CompilerVersion,
         Kind::BuildTime,
+        Kind::SignedBy,
+        Kind::SignedWith,
+        Kind::SignedAt,
+        Kind::BuildId,
+        Kind::TeamId,
     ] {
         assert!(!kind.title().is_empty());
         assert!(
@@ -328,4 +333,194 @@ fn every_kind_of_finding_says_why_it_matters() {
             kind
         );
     }
+}
+
+// The signature.
+//
+// A distinguished name is built by hand here rather than lifted from a real
+// certificate, because the cases worth testing are the ones no certificate
+// authority will issue on request: one with no organisation, one whose
+// length never ends, one nested a thousand deep.
+
+/// der writes a tag, a length and a body, the way a certificate does.
+fn der(tag: u8, body: &[u8]) -> Vec<u8> {
+    let mut out = vec![tag];
+    if body.len() < 0x80 {
+        out.push(body.len() as u8);
+    } else {
+        let len = body.len();
+        let bytes: Vec<u8> = len
+            .to_be_bytes()
+            .iter()
+            .copied()
+            .skip_while(|&b| b == 0)
+            .collect();
+        out.push(0x80 | bytes.len() as u8);
+        out.extend(bytes);
+    }
+    out.extend(body);
+    out
+}
+
+/// A name is a sequence of sets of pairs, and the pair is an identifier and
+/// a string.
+fn distinguished(parts: &[(&[u8], &str)]) -> Vec<u8> {
+    let mut body = Vec::new();
+    for (id, text) in parts {
+        let pair = der(0x30, &[der(0x06, id), der(0x13, text.as_bytes())].concat());
+        body.extend(der(0x31, &pair));
+    }
+    der(0x30, &body)
+}
+
+const CN: &[u8] = &[0x55, 0x04, 0x03];
+const O: &[u8] = &[0x55, 0x04, 0x0a];
+const L: &[u8] = &[0x55, 0x04, 0x07];
+
+#[test]
+fn a_distinguished_name_comes_apart_into_its_pieces() {
+    let name = distinguished(&[(CN, "Ana Moreno"), (O, "Moreno Ltd"), (L, "Bilbao")]);
+    let value = crate::asn1::read(&name).expect("a name this program wrote should read");
+    let mut found = Vec::new();
+    for group in crate::asn1::items(value.body) {
+        for pair in crate::asn1::items(group.body) {
+            let inner = crate::asn1::items(pair.body);
+            found.push((
+                crate::asn1::oid(inner[0].body),
+                crate::asn1::text(&inner[1]),
+            ));
+        }
+    }
+    assert_eq!(found[0], ("2.5.4.3".into(), "Ana Moreno".into()));
+    assert_eq!(found[1], ("2.5.4.10".into(), "Moreno Ltd".into()));
+    assert_eq!(found[2], ("2.5.4.7".into(), "Bilbao".into()));
+}
+
+/// Apple writes its signatures with lengths that are not stated but run
+/// until a pair of zeros. A reader that only takes the stated kind reads no
+/// Apple signature at all, which is how the Mach-O side of this was found
+/// to be silently returning nothing.
+#[test]
+fn a_length_that_is_not_stated_is_still_read() {
+    let inner = der(0x02, &[42]);
+    let mut indefinite = vec![0x30, 0x80];
+    indefinite.extend(&inner);
+    indefinite.extend([0x00, 0x00]);
+
+    let value = crate::asn1::read(&indefinite).expect("an indefinite length should read");
+    assert_eq!(value.tag, 0x30);
+    assert_eq!(value.body, inner.as_slice());
+    assert_eq!(value.end, indefinite.len());
+}
+
+#[test]
+fn a_length_that_never_ends_is_refused_rather_than_chased() {
+    let mut forever = vec![0x30, 0x80];
+    forever.extend([0x30, 0x80].repeat(64));
+    assert!(crate::asn1::read(&forever).is_none());
+}
+
+#[test]
+fn a_thousand_nested_lengths_do_not_take_the_stack_with_them() {
+    let mut deep = [0x30u8, 0x80].repeat(1000);
+    deep.extend([0x00u8, 0x00].repeat(1000));
+    // Whether it reads is not the point. Coming back at all is.
+    let _ = crate::asn1::read(&deep);
+
+    let mut seen = 0usize;
+    crate::asn1::walk(&deep, 0, &mut seen, &mut |_| {});
+}
+
+#[test]
+fn a_length_longer_than_the_bytes_behind_it_is_refused() {
+    assert!(crate::asn1::read(&[0x30, 0x7f, 0x01]).is_none());
+    assert!(crate::asn1::read(&[0x30, 0x84, 0xff, 0xff, 0xff, 0xff]).is_none());
+    assert!(crate::asn1::read(&[]).is_none());
+    assert!(crate::asn1::read(&[0x30]).is_none());
+}
+
+#[test]
+fn a_serial_number_is_written_the_way_everything_else_writes_one() {
+    assert_eq!(crate::asn1::integer(&[0x00, 0x0c, 0x64, 0x96]), "0C6496");
+    assert_eq!(crate::asn1::integer(&[0x00, 0x00]), "0");
+}
+
+#[test]
+fn an_identifier_reads_back_as_its_dotted_form() {
+    // The signing time attribute, which is the one this hunts for.
+    let id = [0x2a, 0x86, 0x48, 0x86, 0xf7, 0x0d, 0x01, 0x09, 0x05];
+    assert_eq!(crate::asn1::oid(&id), "1.2.840.113549.1.9.5");
+    assert_eq!(crate::asn1::oid(&[0x55, 0x04, 0x03]), "2.5.4.3");
+}
+
+/// The exit code turns on this, so it is the one rule in the signature
+/// reader worth a test of its own. Microsoft's certificate has a common
+/// name equal to its organisation, and a check that failed a build for
+/// shipping a Microsoft binary is a check people turn off.
+#[test]
+fn only_a_certificate_with_no_organisation_counts_as_naming_a_person() {
+    let person = crate::signature::Signed {
+        subject: vec![("common name".into(), "Ana Moreno".into())],
+        ..Default::default()
+    };
+    assert!(person.personal());
+
+    for company in [
+        vec![
+            (
+                "common name".to_string(),
+                "Microsoft Corporation".to_string(),
+            ),
+            (
+                "organisation".to_string(),
+                "Microsoft Corporation".to_string(),
+            ),
+        ],
+        vec![
+            ("common name".to_string(), "Microsoft Windows".to_string()),
+            (
+                "organisation".to_string(),
+                "Microsoft Corporation".to_string(),
+            ),
+        ],
+    ] {
+        let signed = crate::signature::Signed {
+            subject: company,
+            ..Default::default()
+        };
+        assert!(
+            !signed.personal(),
+            "{:?} was taken for a person",
+            signed.subject
+        );
+    }
+}
+
+#[test]
+fn a_signature_that_is_rubbish_says_so_rather_than_saying_nothing() {
+    for block in [
+        vec![],
+        vec![0u8; 64],
+        b"not a signature at all".to_vec(),
+        [0x30, 0x80].repeat(40),
+    ] {
+        let findings = pe::describe(&block, "certificate table");
+        assert!(
+            findings.iter().any(|f| f.certainty == Certainty::Unread),
+            "a block of {} bytes was passed over in silence",
+            block.len()
+        );
+    }
+}
+
+/// A signing time is the one reading of a clock that no build flag reaches,
+/// so the two ways it is written both have to come out the same.
+#[test]
+fn both_ways_of_writing_a_time_read_the_same() {
+    let short = der(0x17, b"210504094725Z");
+    let long = der(0x18, b"20210504094725Z");
+    let one = crate::asn1::read(&short).unwrap();
+    let two = crate::asn1::read(&long).unwrap();
+    assert_eq!(crate::asn1::text(&one), "210504094725Z");
+    assert_eq!(crate::asn1::text(&two), "20210504094725Z");
 }

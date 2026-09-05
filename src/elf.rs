@@ -58,6 +58,7 @@ pub fn open(file: &[u8]) -> Result<Opened> {
             }
         }
     }
+    findings.extend(build_id(file, &sections, endian));
 
     Ok(Opened {
         format: Format::Elf,
@@ -148,4 +149,38 @@ fn notes(bytes: &[u8]) -> Vec<String> {
         }
     }
     out
+}
+
+/// The note type a linker uses for the build id.
+const NT_GNU_BUILD_ID: u32 = 3;
+
+/// build_id reads the hash a linker writes so a binary and its separate
+/// debug file can be matched up.
+///
+/// It is not a name and it does not describe the machine, so it sits with
+/// the compiler version rather than with the leaks. What it does is match
+/// two copies of one build: a file published under a handle and the same
+/// file found on a machine that belongs to somebody.
+pub(crate) fn build_id(file: &[u8], sections: &[Section], endian: Endian) -> Option<Finding> {
+    let note = sections.iter().find(|s| s.name == ".note.gnu.build-id")?;
+    let body = note.bytes(file);
+
+    // A note is three lengths, then a name padded to four bytes, then the
+    // description padded the same way.
+    let name_size = u32_at(body, 0, endian)? as usize;
+    let desc_size = u32_at(body, 4, endian)? as usize;
+    let kind = u32_at(body, 8, endian)?;
+    if kind != NT_GNU_BUILD_ID || desc_size == 0 || desc_size > 64 {
+        return None;
+    }
+    let at = 12 + name_size.next_multiple_of(4);
+    let hash = body.get(at..at.checked_add(desc_size)?)?;
+
+    let text: String = hash.iter().map(|b| format!("{b:02x}")).collect();
+    Some(
+        Finding::measured(Kind::BuildId, ".note.gnu.build-id", text).fix(
+            "link with -Wl,--build-id=none if the binary is published without \
+             its debug information, since then there is nothing for it to match",
+        ),
+    )
 }

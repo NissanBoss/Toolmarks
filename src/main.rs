@@ -11,6 +11,7 @@
 // directory inside it. Two is reserved for not being able to read the file,
 // which must never be confused with the file being clean.
 
+mod asn1;
 mod binary;
 mod elf;
 mod error;
@@ -20,6 +21,7 @@ mod macho;
 mod mask;
 mod pe;
 mod report;
+mod signature;
 
 #[cfg(test)]
 mod tests;
